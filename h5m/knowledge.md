@@ -66,9 +66,9 @@ Observed: 2026-04-09
 NotificationNode (a DAG node type that computed change detection during work execution) was removed. Change detection now happens at the service layer: FolderService.getDetectionValues() queries for FIXED_THRESHOLD/RELATIVE_DIFFERENCE values after all work completes. CLI upload returns exit code 2 when changes are detected. This avoids coupling detection logic to the DAG execution model and supports future web frontend use.
 Observed: 2026-04-09
 
-## Per-root-value work tracking replaces global awaitIdle
-Service-layer change detection uses per-upload tracking instead of waiting for the entire WorkQueue to drain. Each Work item carries `sourceValues = List.of(rootValue)` through the cascade chain. WorkQueue tracks a `RootValueTracker` (count + Condition) per root value ID, all guarded by the existing `takeLock`. Race-freedom relies on WorkService.execute() creating cascade work BEFORE calling decrement() in the finally block. The global `awaitIdle`/`isIdle` were removed — no production code needs them.
-Observed: 2026-04-09
+## WorkCompletionService replaces WorkQueue-internal RootValueTracker
+Per-root-value work completion tracking was moved from WorkQueue (non-CDI, using Condition.await on takeLock) to a dedicated WorkCompletionService (@ApplicationScoped CDI bean) using ConcurrentHashMap + AtomicInteger + CompletableFuture. This separation decouples completion tracking from dependency ordering (which stays in WorkQueue). Worker threads never block — only the CLI thread blocks via CompletableFuture.get(). The CDI event WorkCompletedEvent fires on completion, enabling future SSE/WebSocket frontends. Key ordering invariant: trackWork() is called in WorkService.create() before work enters the queue; workCompleted() is called in WorkService.execute()'s finally block after cascade create and decrement. Known issues: (1) non-atomic complete+remove allows stale tracker race, (2) `<= 0` check is fragile if retries are enabled, (3) CascadeType.MERGE still present on Work entity ManyToMany despite being a known source of StaleObjectStateException.
+Observed: 2026-04-15
 
 ## WorkQueue.put() had inverted signal condition (pre-existing bug)
 `put()` signaled `notEmpty` when `c != 0` (queue already non-empty) instead of `c == 0` (queue was empty, now has an item). This meant `take()` could hang forever when put() was the only method adding to an empty queue. Fixed to `c == 0` matching the pattern in `add()`. The bug was latent because `addWorks()` (the primary entry point) signals correctly.
@@ -91,8 +91,9 @@ The CDI producer in ExecutorConfiguration.java was originally `@Dependent`, crea
 Observed: 2026-04-13
 
 ## WorkService.create() must defer queue insertion until transaction commits
-Work entities persisted via em.merge()+em.flush() inside a @Transactional method are not visible to other transactions until the outer transaction commits. Immediately adding them to the in-memory WorkQueue allows worker threads to pick them up before the DB row is visible, causing StaleObjectStateException. Fix: JTA Synchronization.afterCompletion(STATUS_COMMITTED) defers queue insertion. See issue #50.
+Work entities persisted via em.merge()+em.flush() inside a @Transactional method are not visible to other transactions until the outer transaction commits. Immediately adding them to the in-memory WorkQueue allows worker threads to pick them up before the DB row is visible, causing StaleObjectStateException. Fix: JTA Synchronization.afterCompletion(STATUS_COMMITTED) defers queue insertion. REQUIRES_NEW doesn't work because: (a) sourceValues created in the caller's transaction are not committed/visible when the new tx tries to merge them, and (b) CDI self-invocation in execute() for cascade work bypasses interceptors, so REQUIRES_NEW wouldn't fire anyway. afterCompletion avoids both problems by joining the caller's transaction for persist and only deferring the queue insertion. create() is called from FolderService.upload(), FolderService.recalculate(), and self-invoked from WorkService.execute() for cascade work — all three paths must be considered for transaction boundary changes. See issue #50.
 Observed: 2026-04-13
+Updated: 2026-04-16
 
 ## CascadeType.MERGE on Work's ManyToMany causes StaleObjectStateException
 Work entity had `cascade = {CascadeType.PERSIST, CascadeType.MERGE}` on sourceValues and sourceNodes. When em.merge() was used in execute(), the cascade attempted to merge related ValueEntity/NodeEntity instances, triggering dirty-checking across detached entities from different transactions. Removing CascadeType.MERGE (keeping only PERSIST) and switching execute() to use em.find() resolved the issue.
@@ -105,3 +106,15 @@ Observed: 2026-04-13
 ## calculateSourceValuePermutations returns null for mismatched multi-source nodes
 NodeService.calculateSourceValuePermutations() (line 227) returns null in the Length case when source value counts don't match across sources. This causes NPE when processing fan-in nodes (e.g., a "dataset" node depending on 3 first-tier nodes). Pre-existing bug — not yet fixed.
 Observed: 2026-04-13
+
+## afterCompletion callbacks run outside the Hibernate session
+JTA Synchronization.afterCompletion() runs after the transaction commits and the Hibernate session closes. Any lazy proxies on entities accessed inside the callback will throw LazyInitializationException. Fix: eagerly initialize all fields that the callback will touch while still inside the @Transactional method. For WorkQueue.sort() → Work.dependsOn(), this means: Hibernate.initialize(sv.node), Hibernate.initialize(sv.sources), and NodeEntity.initializeAncestorCache() (which pre-computes the ancestor ID set so dependsOn() never traverses lazy sources). The dependsOn(self) call in NodeEntity triggers computeAncestorIds() which traverses the full graph and initializes all needed lazy collections recursively.
+Observed: 2026-04-16
+
+## em.merge() does not make the parameter managed
+em.merge(w) returns a NEW managed copy; the original parameter `w` stays detached with potentially uninitialized lazy proxies. Code in finally blocks that needs entity data must extract it from the merged `work` copy (inside the try) into local variables, not access `w` directly. Example: getRootValueId() on detached `w` throws LazyInitializationException for Work loaded from DB on restart (onStart path).
+Observed: 2026-04-16
+
+## Retry re-queue must happen on rollback too
+When a @Transactional execute() catches an exception, persists retryCount, and defers retry re-queue via afterCompletion — if the transaction rolls back, the retryCount update is lost AND the work isn't re-queued (only STATUS_COMMITTED was handled). The work gets stuck in DB until process restart. Fix: re-queue on rollback too, since DB state wasn't advanced. The in-memory retryCount on the Work parameter still tracks attempts.
+Observed: 2026-04-16

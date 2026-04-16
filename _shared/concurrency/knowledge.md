@@ -13,3 +13,11 @@ Observed: 2026-04-13
 ## Thread.sleep() inside @Transactional holds DB connections
 When a method is `@Transactional`, the interceptor wraps the entire method including catch/finally blocks. A `Thread.sleep()` in a catch block holds the DB connection for the sleep duration, risking connection pool exhaustion under concurrent failures.
 Observed: 2026-04-13
+
+## JTA afterCompletion runs outside the Hibernate session scope
+Synchronization.afterCompletion() fires after the transaction commits AND after the Hibernate session closes. Any code inside the callback that touches lazy-loaded entity fields will throw LazyInitializationException. Must eagerly initialize (Hibernate.initialize() or force-access) all lazy fields BEFORE registering the callback, while the session is still active. This applies to both FetchType.LAZY ManyToOne fields and lazy collections (ManyToMany, OneToMany).
+Observed: 2026-04-16
+
+## em.merge() parameter stays detached
+`em.merge(entity)` returns a NEW managed copy; the original parameter remains detached. Accessing lazy fields on the original parameter outside the session throws LazyInitializationException. Extract needed data from the returned managed copy into local variables before the session closes.
+Observed: 2026-04-16

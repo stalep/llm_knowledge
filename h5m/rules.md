@@ -12,3 +12,7 @@ Confirmations: 3 (issue #5 fix, tests, code review)
 Bidirectional relationships (Node->NodeGroup->List<Node>) and @ManyToMany closure tables cause StackOverflow in JSON serialization even when @JsonBackReference is used on entities. Always use flat DTOs with ID-based references for REST endpoints. CycleAvoidingContext in MapStruct prevents cycles during mapping but doesn't help when Jackson serializes the resulting API records.
 Promoted from hypothesis: 2026-04-07
 Confirmations: 3 (RestEndpointTest StackOverflow, RestAssured Groovy parser crash, OpenAPI spec $ref cycle)
+
+## Keep PRs focused and split out orthogonal changes
+Team values focused PRs. Split out optimizations, metrics, dead code cleanup, and unrelated refactors into separate PRs unless they're required for correctness. Example: PR #51 was trimmed from 7 files to 3 by splitting out optimistic locking (#53), retry logic (#54), and metrics (#55). Removing CascadeType.MERGE after switching from em.merge to em.find should be a separate PR, not bundled with the work queue race fix.
+Added: 2026-04-16

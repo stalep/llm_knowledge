@@ -17,3 +17,7 @@ Observed: 2026-04-13
 ## Context interface removed cwd/homeDir tracking
 The `Context` interface previously had `setCwd/getCwd/setHomeDir/getHomeDir` methods. These were removed in PR #267 in favor of resolving paths directly via `shSync("pwd")` and `shSync("echo ~/")` at the point of use.
 Observed: 2026-04-13
+
+## shSync can be made transparent to $? with wrapping
+Pattern: `__qdup_saved=$?; (exit $__qdup_saved); <command>; (exit $__qdup_saved)`. This saves `$?`, restores it before the command (so the command sees the original `$?`), runs the command, then restores `$?` again after. No stdout pollution since wrapper commands produce no output. Discussed as a follow-up to the exit code clobbering issue in PR #267.
+Observed: 2026-04-15
