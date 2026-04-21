@@ -1,0 +1,38 @@
+{
+  "model": "claude-opus-4-6",
+  "enabledPlugins": {
+    "claude-mem@thedotmack": false
+  },
+  "extraKnownMarketplaces": {
+    "thedotmack": {
+      "source": {
+        "source": "github",
+        "repo": "thedotmack/claude-mem"
+      }
+    }
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/knowledge-tree-init.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/knowledge-tree-remind.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

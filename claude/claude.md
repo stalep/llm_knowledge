@@ -37,8 +37,8 @@ Create new shared topics under _shared/ when an insight applies across projects
 2. If the domain folder doesn't exist yet, create it and add it to index.md.
 3. Read the domain's rules.md and hypotheses.md if they exist.
 4. Read relevant _shared/ topic rules.md files (e.g., _shared/performance/rules.md if doing performance-sensitive work).
-4. Apply all applicable rules by default.
-5. Check if any hypothesis (project or shared) can be tested with today's work.
+5. Apply all applicable rules by default.
+6. Check if any hypothesis (project or shared) can be tested with today's work.
 
 ## After completing a task
 
@@ -88,8 +88,21 @@ Confirmations: <count>
 - **New insight** → add to knowledge.md or hypotheses.md depending on confidence.
 - **Hypothesis confirmed** → increment its confirmation count and update last tested date.
 - **Hypothesis reaches 3+ confirmations** → promote to rules.md, remove from hypotheses.md.
+- **Hypothesis resolved in code** → remove from hypotheses.md. If the fix contained a non-obvious insight, move it to knowledge.md.
 - **Rule contradicted by new evidence** → demote back to hypotheses.md, reset confirmation count to 0, note the contradiction.
 - **Knowledge proven wrong** → remove or correct the entry.
+
+## Hygiene
+
+Before adding new entries to hypotheses.md, check existing entries:
+- Remove entries marked "resolved in current code" — the fix is in the codebase, not here.
+- Promote entries with 3+ confirmations to rules.md.
+- Remove entries about bugs that have been fixed, unless the root cause pattern is reusable.
+- Knowledge entries older than 6 months that describe code structure should be verified — the code may have changed.
+- When knowledge.md exceeds ~30 entries, archive stale entries:
+  - Move entries about code patterns that are now well-established into an `archive/` subfolder.
+  - Keep entries that describe gotchas, non-obvious behavior, or things that would surprise a new contributor.
+  - Delete entries about one-off bugs that were fixed and won't recur.
 
 ## index.md
 
