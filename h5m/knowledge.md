@@ -118,3 +118,23 @@ Observed: 2026-04-16
 ## Retry re-queue must happen on rollback too
 When a @Transactional execute() catches an exception, persists retryCount, and defers retry re-queue via afterCompletion — if the transaction rolls back, the retryCount update is lost AND the work isn't re-queued (only STATUS_COMMITTED was handled). The work gets stuck in DB until process restart. Fix: re-queue on rollback too, since DB state wasn't advanced. The in-memory retryCount on the Work parameter still tracks attempts.
 Observed: 2026-04-16
+
+## Security model: config-driven AuthorizationService as single checkpoint
+h5m uses a single AuthorizationService bean with `h5m.security.enabled` (default false). In local mode all checks pass (including null username). In service mode: admin role grants all access, team membership is checked via JPQL existence query (not collection loading), folders with no team are unrestricted. This replaces Horreum's 5-layer model (filter + augmentor + interceptor + annotation + 33 RLS policies). PR 1 covers entities/services/CLI; PR 2 will add OIDC + API key authentication + REST annotations.
+Observed: 2026-04-17
+
+## @TestProfile with QuarkusTestProfile for config overrides in tests
+Use `@TestProfile(SecurityEnabledProfile.class)` to override config properties per test class. The profile class implements `QuarkusTestProfile.getConfigOverrides()` returning a Map. This allows testing security-enabled behavior while keeping all existing tests running with security disabled (via application-test.properties).
+Observed: 2026-04-17
+
+## Avoid PostgreSQL reserved words as JPA entity names
+"user" is a reserved word in PostgreSQL. Use `@Entity(name = "h5m_user")` to avoid conflicts. The entity class can still be named `User` — only the JPA entity/table name needs to be different.
+Observed: 2026-04-17
+
+## DetectionNode interface generalizes fingerprint scoping for all change detection algorithms
+FixedThreshold and RelativeDifference both need to scope range values per fingerprint when a "dataset" split node fans out uploads into multiple items. `findScopingNode(DetectionNode)` computes the nearest common ancestor of the fingerprint and range nodes via BFS, and this scoping node replaces the user-specified `groupBy` in `findMatchingFingerprint` calls. The `getAncestor` call for result attachment still uses `groupBy` (where to attach results in the value tree). New detection algorithms (e.g., Hunter) just implement `DetectionNode` and call `findScopingNode` to get correct scoping automatically.
+Observed: 2026-04-19
+
+## h5m runs change detection per-upload, producing cumulative detections
+Unlike Horreum which can batch process, h5m's `calculateRelativeDifferenceValues` runs after each upload via the work queue. With 3 uploads of trending data (window=1, minPrevious=1), the 2nd upload detects changes at the highest domain values (enough history), and the 3rd upload detects at the next-highest. This produces 4 total detections instead of the 2 a one-shot analysis would find. This is expected behavior, not a bug.
+Observed: 2026-04-19

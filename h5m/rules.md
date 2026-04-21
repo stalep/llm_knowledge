@@ -16,3 +16,7 @@ Confirmations: 3 (RestEndpointTest StackOverflow, RestAssured Groovy parser cras
 ## Keep PRs focused and split out orthogonal changes
 Team values focused PRs. Split out optimizations, metrics, dead code cleanup, and unrelated refactors into separate PRs unless they're required for correctness. Example: PR #51 was trimmed from 7 files to 3 by splitting out optimistic locking (#53), retry logic (#54), and metrics (#55). Removing CascadeType.MERGE after switching from em.merge to em.find should be a separate PR, not bundled with the work queue race fix.
 Added: 2026-04-16
+
+## Never remove developer comments unless explicitly told to
+Comments such as TODOs, design rationale, known-issue notes, and disabled-test explanations carry institutional context that isn't obvious from the code alone. Leave existing comments in place during refactoring or cleanup. Only remove a comment if the user explicitly asks for it.
+Added: 2026-04-21
