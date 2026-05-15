@@ -27,6 +27,12 @@ set on the parent command are silently lost.
 The `checkedRun()` test helper also only calls `cmd.doCall()`, not `cmd.execute()`, so
 even if `preview` were set on the child, `Util.setPreview(true)` would still not be called.
 
+**Testing implication:** Tests for inherited boolean flags (verbose, quiet, offline, fresh)
+must assert via `Util.isVerbose()` etc., NOT via the field on the child command (e.g.,
+`run.verbose`). The fields remain false on the child instance because aesh's
+`propagateInheritedOptions()` doesn't reliably copy them in the `buildExecutor` path.
+The `applyParentFlags()` workaround sets the Util state from raw args.
+
 Observed: 2026-04-18
 
 ## Aesh @OptionGroup does not support space-separated key=value format
@@ -240,19 +246,19 @@ field on the command class (or on a base class that the command extends). For ex
 
 Observed: 2026-04-19
 
-## Native-image config files still reference deleted picocli classes
+## Native-image config requires Maven model and Gson reflection entries
 
-After the aesh migration (commit a25367b7), the native-image config files were not updated:
-- `src/native-image/config/reflect-config.json` still references `StrictParameterPreprocessor`,
-  `picocli.CommandLine`, `picocli.CommandLine$IFactory`, `picocli.CommandLine$Model$CommandSpec`,
-  and `handleDefaultRun` with the old picocli parameter signature.
-- `src/native-image/config/reachability-metadata.json` still references all 10 deleted classes:
-  AIOptions, CommaSeparatedConverter, ExportMixin, FormatMixin, HelpMixin, KeyValueConsumer,
-  StrictParameterPreprocessor, TemplatePropertyConverter, VersionProvider, plus
-  `picocli.CommandLine$AutoHelpMixin`.
-These stale references will cause native-image build warnings or failures.
+The native-image `reachability-metadata.json` needs `allPublicMethods` for Maven model classes
+(`Model`, `Build`, `BuildBase`, `ModelBase`, `Organization`, `Reporting`) because Maven's
+`StringVisitorModelInterpolator` walks them reflectively during dependency resolution.
 
-Observed: 2026-04-19
+It also needs `allPublicFields` for Gson-serialized CLI output classes (`AliasOut`, `CatalogOut`,
+`TemplateOut`, `JdkOut`, `OriginOut`) used by `--format json` output.
+
+These entries are not auto-discovered by native-image tracing because they depend on which
+commands and dependencies are exercised during the trace run.
+
+Observed: 2026-05-01, updated 2026-05-05
 
 ## TemplatePropertyConverterTest file name is misleading after migration
 
@@ -262,3 +268,152 @@ but the file/class name references a class that no longer exists. Should be rena
 `TemplatePropertyParsingTest` or similar.
 
 Observed: 2026-04-19
+
+## Aesh is 2x FASTER than picocli on JVM for `jbang version` (JDK 25, 2026-04-23)
+
+End-to-end `java -jar jbang.jar version` timing (shadow jar, JDK 25):
+- Picocli: ~220ms (1719 classes loaded, last at 0.225s)
+- Aesh: ~110ms (1578 classes loaded, last at 0.114s)
+
+Class loading breakdown:
+| Category            | Picocli | Aesh | Delta |
+|---------------------|---------|------|-------|
+| Total classes       | 1719    | 1578 | +141  |
+| JDK classes         | 1376    | 1216 | +160  |
+| Framework classes   | 178     | 130  | +48   |
+| jbang CLI classes   | 103     | 194  | -91   |
+| jbang non-CLI       | 40      | 22   | +18   |
+| Lambda classes      | 108     | 84   | +24   |
+| AeshMetadata        | 0       | 120  | -120  |
+| Other               | 22      | 16   | +6    |
+
+Picocli's extra 160 JDK classes include:
+- 32 sun.reflect.generics.* classes (vs 17 for aesh) - generic type resolution
+- 30 picocli BuiltIn converters (registered eagerly for all types)
+- 15 extra java.lang.invoke.LambdaForm classes
+- 11 mixin-related classes (separate mixin classes not needed in aesh)
+
+Root cause of picocli slowness: picocli uses runtime reflection to introspect all @Option/@Parameters
+fields, which forces loading field VALUE types (domain classes like Project, Catalog, Source$Type,
+JdkManager, etc.) even when those commands won't be executed. Aesh's compile-time metadata providers
+access fields via anonymous inner classes that only reference the command type, not field value types.
+
+Picocli loads 18 domain classes not loaded by aesh: Alias$JavaAgent, Catalog, CatalogItem, Template,
+TemplateProperty, ArtifactInfo, MavenRepo, Jdk, JdkManager, BuildContext, CmdGeneratorBuilder,
+Project, ProjectBuilder, RefTarget, Source$Type, TemplateEngine, Cache$CacheClass, Configuration (2nd lambda).
+
+The earlier belief that "aesh takes ~110ms, picocli takes ~21ms" was incorrect. The 21ms number was
+from an in-JVM benchmark measuring only `getCommandLine() + parseArgs()`, not end-to-end process startup.
+End-to-end, aesh is ~2x faster than picocli.
+
+Observed: 2026-04-23
+
+## Lambda expressions cause JVM startup regression on JDK 25 (2026-04-23)
+
+The aesh annotation processor generated ~3,045 lambda call sites across 63 `_AeshMetadata` classes
+(3 per option: fieldSetter, fieldResetter, fieldGetter). All metadata classes are loaded eagerly at
+startup, even when only one command is executed.
+
+Each lambda triggers `LambdaMetafactory.metafactory()` → `InnerClassLambdaMetafactory.spinInnerClass()`
+which dynamically generates anonymous classes. On JDK 25, this caused ~100ms slower startup vs picocli.
+JDK 25's `java.lang.classfile` API (used for lambda class generation) has higher per-lambda bootstrap
+cost than JDK 11's ASM-based approach.
+
+Fix: Replace generated lambdas with anonymous inner classes in CodeGenerator. Also replaced lambdas
+in CLConverterManager (23 lambdas → concrete converter classes), SettingsBuilder (50 lambdas → direct
+setters), and AeshCommandRuntimeBuilder (11 lambdas → direct field assignment).
+
+Result: JDK 25 gap closed from ~100ms to ~15-30ms. Remaining gap is due to eager loading of all 63
+metadata classes vs picocli's lazy approach (~17 classes for `jbang version`).
+
+Observed: 2026-04-23
+
+## Exit code propagation bug in Main.main() (2026-04-23)
+
+`Main.main()` called `AeshRuntimeRunner.execute()` but discarded the returned `CommandResult`.
+Non-zero exit codes from parse errors (unknown options, mutually exclusive options) were silently
+converted to exit 0. Fix: capture the `CommandResult` and call `System.exit(exitCode)` when non-zero.
+
+Observed: 2026-04-23
+
+## --help on group commands blocked by parser exclusion (2026-04-23)
+
+`AeshCommandLineParser.parse()` had `& !(equalsIgnoreCase("--help"))` that prevented `--help` from
+being parsed as an option on group commands with `generateHelp=true`. This caused `--help` on the
+root command (e.g., `jbang --help`) to be treated as an unknown subcommand, producing an error
+message and exit code 2. Removing the exclusion allows `--help` to flow through `doParse()` normally.
+
+Observed: 2026-04-23
+
+## Picocli CLI parsing baseline benchmarks (main branch, 2026-04-23)
+
+Benchmarked on Linux 6.19.12, with 20 warmup + 100 measured iterations per scenario.
+All times include `JBang.getCommandLine()` (picocli CommandLine construction).
+
+| Scenario                     | min     | avg     | median  | p95     | max     |
+|------------------------------|---------|---------|---------|---------|---------|
+| getCommandLine() only        | 19.99ms | 23.90ms | 23.21ms | 29.52ms | 34.24ms |
+| version                      | 19.65ms | 21.57ms | 21.27ms | 23.71ms | 27.05ms |
+| run (minimal)                | 20.22ms | 21.88ms | 21.68ms | 23.19ms | 27.32ms |
+| run (with options)           | 20.23ms | 22.20ms | 22.32ms | 23.56ms | 24.72ms |
+| run (with deps)              | 20.43ms | 22.26ms | 22.32ms | 24.45ms | 26.48ms |
+| build (compile opts)         | 19.64ms | 21.93ms | 22.00ms | 23.53ms | 23.90ms |
+| alias list                   | 19.62ms | 21.79ms | 21.78ms | 23.32ms | 24.13ms |
+| init (with options)          | 19.46ms | 21.55ms | 21.52ms | 23.52ms | 23.94ms |
+| execute("version") full      | 19.74ms | 21.42ms | 21.28ms | 22.82ms | 25.71ms |
+
+Key findings:
+- Registry build (getCommandLine) dominates total time at ~20-24ms median
+- parseArgs adds negligible overhead (~0-1ms) regardless of scenario complexity
+- handleDefaultRun adds negligible overhead
+- The `--module` option uses `StrictParameterPreprocessor` with `arity="0..1"`, requiring
+  `--module=value` syntax (not `--module value`). This is a picocli-specific behavior.
+
+Observed: 2026-04-23
+
+## ExitException must be caught in BaseCommand.execute(), not left to aesh
+
+Aesh's `Executions.java:275-277` catches any `Exception` from `command.execute()`, wraps it in
+a new `RuntimeException`, and sets `result=CommandResult.FAILURE`. If `doCall()` throws
+`ExitException(EXIT_INVALID_INPUT=2)`, aesh converts it to exit code 4 (FAILURE) unless
+`BaseCommand.execute()` intercepts it first.
+
+Fix: catch `ExitException` in `execute()`, print the error message via `Util.errorMsg()`,
+and return `CommandResult.valueOf(e.getStatus())` to preserve the exact exit code.
+
+Observed: 2026-04-29
+
+## Deprecated flag scan must only check leading options
+
+The deprecated flag detector in `Main.handleDefaultRun()` must only scan `leadingOpts`
+(flags before the first positional argument), not all args. Otherwise `jbang run echo.java --init`
+triggers the deprecated flag error even though `--init` is a script argument, not a jbang flag.
+
+Observed: 2026-05-03
+
+## JBangDefaultValueProvider must key by class, not leaf command name
+
+Config key resolution (e.g., `app.list.format`) requires knowing the full command path.
+The command path map must be keyed by `Class<?>`, not by leaf command name (e.g., `"list"`),
+because multiple commands share the same leaf name (`alias list`, `template list`, `config list`,
+etc.). Using leaf name as key causes the last-registered command to win, producing wrong config
+keys for all others.
+
+Observed: 2026-05-03
+
+## Aesh native image startup benchmarks (2026-05-01)
+
+End-to-end benchmarks with GraalVM 25 native image, 20 warmup + 100 measured iterations:
+
+| Scenario       | Aesh   | Picocli | Speedup |
+|----------------|--------|---------|---------|
+| version        | 6ms    | 33ms    | 5.5x    |
+| run --help     | 6ms    | 37ms    | 6.2x    |
+| --help         | 29ms   | 58ms    | 2.0x    |
+
+JDK 25 Temurin (JVM mode):
+| version        | 109ms  | 228ms   | 2.1x    |
+| run --help     | 118ms  | 245ms   | 2.1x    |
+| --help         | 207ms  | 303ms   | 1.5x    |
+
+Observed: 2026-05-01

@@ -79,8 +79,9 @@ Detection nodes (FIXED_THRESHOLD, RELATIVE_DIFFERENCE) are identified by `NodeTy
 Observed: 2026-04-09
 
 ## sqlpath/sqlpathall silently delete no-match values
-When SQL jsonpath queries return null or empty arrays, the created ValueEntity is deleted (NodeService.java calculateSqlJsonpathValuesFirstOrAll). Horreum instead keeps null values so users can identify missing iterations. h5m's approach is acceptable for now but may need revisiting.
+When SQL jsonpath queries return null or empty arrays, the created ValueEntity is deleted (NodeService.java calculateSqlJsonpathValuesFirstOrAll). Horreum instead keeps null values so users can identify missing iterations. PR #81 (issue_80 branch) changes this to SELECT-first: the jsonpath result is computed via SELECT before creating the ValueEntity, so null results never get inserted. For PostgreSQL, sibling sql/sqlall nodes sharing the same source are batched into a single query using VALUES + CASE, reducing ~82 individual queries to 2 batched queries. Benchmark: 24.5% faster on the qvss perf test (47.1s → 35.5s for 100 uploads).
 Observed: 2026-04-07
+Updated: 2026-05-05
 
 ## jjq serializes integer-valued doubles without decimal suffix
 The jjq library (io.hyperfoil.tools:jjq-jackson, which replaced jackson-jq in commit 862dd34) formats numbers like 20.0 as `20` (no `.0` suffix) in JSON output. jackson-jq preserved the decimal (`20.0`). This affects any test or assertion that string-matches on jq-extracted numeric values. FixedThreshold violation values (built via ObjectMapper's DoubleNode) still use `20.0` format since they bypass jq.
@@ -120,8 +121,17 @@ When a @Transactional execute() catches an exception, persists retryCount, and d
 Observed: 2026-04-16
 
 ## Security model: config-driven AuthorizationService as single checkpoint
-h5m uses a single AuthorizationService bean with `h5m.security.enabled` (default false). In local mode all checks pass (including null username). In service mode: admin role grants all access, team membership is checked via JPQL existence query (not collection loading), folders with no team are unrestricted. This replaces Horreum's 5-layer model (filter + augmentor + interceptor + annotation + 33 RLS policies). PR 1 covers entities/services/CLI; PR 2 will add OIDC + API key authentication + REST annotations.
+h5m uses a single AuthorizationService bean with `h5m.security.enabled` (default false). In local mode all checks pass (including null username). In service mode: admin role grants all access, team membership is checked via JPQL existence query (not collection loading), folders with no team are unrestricted. This replaces Horreum's 5-layer model (filter + augmentor + interceptor + annotation + 33 RLS policies). Phase 1 (PR #52) covers entities/services/CLI. Phase 2 (issue #57) adds OIDC + API key authentication + REST security annotations.
 Observed: 2026-04-17
+Updated: 2026-04-25
+
+## @Authenticated requires an identity even when h5m.security.enabled=false
+Adding `@Authenticated` to REST endpoints blocks all unauthenticated requests — including local mode where security is disabled. The ApiKeyAuthenticationMechanism must return a synthetic "local admin" SecurityIdentity (with admin+user roles) when `h5m.security.enabled=false`, so `@Authenticated` and `@RolesAllowed` pass without requiring real credentials. Without this, all existing tests break with 401.
+Observed: 2026-04-25
+
+## ApiKey.user must be EAGER for cross-transaction use
+ApiKey.user was originally LAZY, but `ApiKeyService.validateKey()` returns the `User` entity to be used after the transaction closes (in the identity provider). Accessing the lazy proxy outside the session throws LazyInitializationException. Changed to EAGER — API key lookups always need the associated user. Horreum's `UserApiKey.user` is also EAGER.
+Observed: 2026-04-25
 
 ## @TestProfile with QuarkusTestProfile for config overrides in tests
 Use `@TestProfile(SecurityEnabledProfile.class)` to override config properties per test class. The profile class implements `QuarkusTestProfile.getConfigOverrides()` returning a Map. This allows testing security-enabled behavior while keeping all existing tests running with security disabled (via application-test.properties).
@@ -131,10 +141,94 @@ Observed: 2026-04-17
 "user" is a reserved word in PostgreSQL. Use `@Entity(name = "h5m_user")` to avoid conflicts. The entity class can still be named `User` — only the JPA entity/table name needs to be different.
 Observed: 2026-04-17
 
-## DetectionNode interface generalizes fingerprint scoping for all change detection algorithms
-FixedThreshold and RelativeDifference both need to scope range values per fingerprint when a "dataset" split node fans out uploads into multiple items. `findScopingNode(DetectionNode)` computes the nearest common ancestor of the fingerprint and range nodes via BFS, and this scoping node replaces the user-specified `groupBy` in `findMatchingFingerprint` calls. The `getAncestor` call for result attachment still uses `groupBy` (where to attach results in the value tree). New detection algorithms (e.g., Hunter) just implement `DetectionNode` and call `findScopingNode` to get correct scoping automatically.
+## DetectionNode interface provides shared contract for change detection algorithms
+FixedThreshold and RelativeDifference both implement DetectionNode (getFingerprintNode, getGroupByNode, getRangeNode, getFingerprintFilter). The `groupBy` node (set via the `by` CLI parameter) serves as both the scoping boundary and the result attachment point. Users must specify `by` explicitly for dataset split scenarios — without it, `groupBy` defaults to root and fingerprint-to-range matching crosses split boundaries. An earlier `findScopingNode` method that auto-inferred scoping from the DAG was removed per team consensus that it made assumptions not part of the model's constraints.
 Observed: 2026-04-19
+Updated: 2026-04-21
+
+## Removing --enable-preview from surefire causes cascading test failures on Java 21
+The `--enable-preview` flag in pom.xml's surefire `<argLine>` is required for CI (Java 21). Removing it causes Quarkus/Arjuna transaction errors (`ARJUNA016051: thread is already associated with a transaction!`) across all @QuarkusTest classes, even though the code compiles fine without it. The errors appear unrelated to preview features — they manifest as transaction failures, not class loading errors. The `--enable-preview` removal should be paired with a CI Java version upgrade.
+Observed: 2026-04-21
+
+## Horreum transformer/label name collisions require de-duplication during import
+Horreum tests may have transformer extractors and target schema labels with the same name (e.g., `tag`, `testName`). In h5m's flattened node tree, both become nodes — creating ambiguity when fingerprint lookup matches by name. The correct resolution is to remove the extractor-created node when the target schema label is encountered, since the label represents the final computed value. Papering over the ambiguity (e.g., picking last match) leaves the duplicate node in the graph and produces incorrect results.
+Observed: 2026-04-21
+
+## Horreum tests with multiple transformers sharing the same target schema
+Some Horreum tests (e.g., keycloak-benchmark, rhivos-perf-comprehensive) have multiple transformers that target the same output schema but handle different source schema versions (e.g., `$.autobench_workload[*].results` vs `$.autobench_workload.data[*].results`). In Horreum, both transformers run independently and only the matching one produces output. The h5m import merges extractors from all transformers: shared extractors with different paths get a primary node, an `_alt` node, and a JS coalesce node `(primary, alt) => primary != null ? primary : alt`. Extractors unique to one transformer (e.g., `autoware_pcp_ts`) are skipped, and the function from the transformer whose parameters are all shared is used.
+Observed: 2026-04-21
+Updated: 2026-04-28
+
+## Hibernate cascade persist reorders @OrderColumn indices
+Hibernate's cascade persist assigns `@OrderColumn` values based on entity ID order, not Java List insertion order. The `setNodes()` method on `FixedThreshold` and `RelativeDifference` sets the sources list directly. The getters (`getFingerprintNode`, `getGroupByNode`, `getRangeNode`) use positional access (`sources.get(0/1/2)`) with no bounds checking or config JSON fallback — they will throw `IndexOutOfBoundsException` if the sources list is shorter than expected. Note: `order-inserts=true` was investigated but is NOT the cause — the reordering happens during cascade persist regardless.
+Observed: 2026-04-28
+Updated: 2026-05-05
+
+## Legacy import: coalesced transformers with JQ combiner nodes
+h5m's legacy import creates both transformer nodes, coalesces them at the transformer level (before the JQ `.[]` split) so the permutation logic handles empty sources correctly, then creates a single dataset node. For multi-extractor single-param labels (e.g., Autobench with `workload` and `results` extractors), a JQ combiner node builds the combined object in one expression instead of using separate extractor nodes that produce mismatched value counts. PostgreSQL jsonpath filter expressions (`? (@.field == "value")`) are converted to JQ `select()`. No-transform path deduplicates coalesce sources and adds variant label nodes to the group to avoid NodeEntity.equals dedup issues.
+Observed: 2026-04-28
+Updated: 2026-05-05
+
+## Horreum label functions assume numeric types but JSON stores numbers as strings
+Many Horreum label functions (e.g., `value => value.reduce((a,b) => a+b)`) assume numeric inputs, but some run data stores numbers as JSON strings ("759660"). The fix belongs at the node operation level during import — wrapping the JS function to coerce string-encoded numbers — not in h5m's generic JS evaluation engine. The `wrapWithNumberCoercion()` approach prepends `param = typeof param === "string" && !isNaN(param) ? Number(param) : param;` for each function parameter.
+Observed: 2026-04-21
+
+## Horreum Util.java handles string-to-number coercion in three distinct places
+Verified by inspecting Hyperfoil/Horreum `horreum-backend/src/main/java/io/hyperfoil/tools/horreum/svc/Util.java`:
+1. **`toDoubleOrNull(Value value, ...)`** (lines 115-143): GraalVM polyglot Value overload — checks `value.isString()` and calls `Double.parseDouble(value.asString())`. Used when JS combination functions return string-encoded numbers.
+2. **`toDoubleOrNull(Object value)`** (lines 145-169): Object overload — strips surrounding quotes from strings (`"123"` -> `123`), then calls `Double.parseDouble()`. Also handles Long/Integer/Float/Short. Used by ReportServiceImpl.
+3. **AlertingServiceImpl.java** (lines 493-500): Inline in the `nonFuncResultConsumer` lambda — checks `data.value.isTextual()` and calls `Double.parseDouble(data.value.asText())` to coerce JSON text nodes to doubles for datapoint creation.
+All three are at the *consumption* layer (when turning values into datapoints/reports), not during label evaluation. Horreum does NOT coerce string-encoded numbers during JS function *input* — the label functions receive the raw JSON types. This confirms h5m's `wrapWithNumberCoercion()` approach (coercing at function input time) goes beyond what Horreum did.
+Observed: 2026-04-22
+
+## Picocli Callable.call() runs outside CDI request/transaction context
+Quarkus CLI commands using Picocli's `Callable<Integer>` run outside the CDI request scope. Calling `entity.persist()` (Panache) directly throws `ContextNotActiveException`. Fix: inject a CDI service bean with `@Transactional` methods and call through that instead.
+Observed: 2026-04-21
+
+## Horreum transformer .[] splits objects by key, not as single dataset
+Horreum treats non-array transformer output as a single dataset. Using jq `.[]` on an object iterates its *values* (one per key), not its elements. For example, `{info: {...}, stats: [...]}` produces two items (the info object and the stats array) instead of one dataset. The correct jq expression is `if type == "array" then .[] else . end`.
+Observed: 2026-04-22
+
+## value_edge(parent_id) index is critical for recursive CTE performance
+The recursive CTE in `getDescendantValues` joins on `parent_id`, but only `child_id` is indexed by default (JPA generates indexes for the owning side). Adding `CREATE INDEX idx_value_edge_parent_id ON value_edge(parent_id)` gives 2.4x speedup. Similarly, `value(node_id)` and `value(folder_id)` should be indexed.
+Observed: 2026-04-22
+
+## Work queue thread pool contention dominates at high thread counts
+50 concurrent threads all running recursive CTEs cause massive PostgreSQL contention — reducing to 5 threads gives 10x speedup for bulk imports. At low thread counts (1 vs 5), there's no measurable difference, indicating the bottleneck shifts from contention to per-item processing time. Optimal pool size depends on workload: high for independent simple queries, low for recursive/complex queries.
+Observed: 2026-04-22
+
+## Horreum multi-extractor labels pass named-property objects to single-param functions
+When a Horreum label has multiple extractors and a function with a single parameter (e.g., `value => { value["workload"]... }`), Horreum passes an object where each key is the extractor name. h5m's `createNodesFromLabel` fallback for single-param functions collects all sources but doesn't construct a named-property object, so labels like Autobench that access `value["workload"]` produce 0 values.
+Observed: 2026-04-22
+
+## PostgreSQL cursor-based fetching requires autoCommit=false
+PostgreSQL JDBC driver ignores `setFetchSize()` unless `connection.setAutoCommit(false)` is set. Without both, all rows are buffered in memory. This caused OOM when loading 1,327 large JSON run records in LoadLegacyRuns.
+Observed: 2026-04-22
 
 ## h5m runs change detection per-upload, producing cumulative detections
 Unlike Horreum which can batch process, h5m's `calculateRelativeDifferenceValues` runs after each upload via the work queue. With 3 uploads of trending data (window=1, minPrevious=1), the 2nd upload detects changes at the highest domain values (enough history), and the 3rd upload detects at the next-highest. This produces 4 total detections instead of the 2 a one-shot analysis would find. This is expected behavior, not a bug.
 Observed: 2026-04-19
+
+## NodeEntity.equals treats all unpersisted nodes with same name/operation as equal
+When `id == null`, `NodeEntity.equals()` compares source IDs one level deep — but unpersisted sources also have `null` IDs, so `Objects.equals(null, null)` returns true. This makes `NodeGroupEntity.addNode()` (which uses `List.contains()`) silently reject legitimately distinct nodes that have the same name and operation but different sources. Affects any code path that creates multiple nodes with the same structure but different source contexts (e.g., per-dataset label nodes in multi-transformer import).
+Observed: 2026-05-01
+
+## Multi-transformer import: coalesce at transformer level, not dataset level
+When coalescing multi-transformer outputs, coalesce BEFORE the jq split (at transformer level), not after (at dataset level). Transformer nodes produce 0 or 1 values — `calculateSourceValuePermutations` handles this via the simple case (`maxNodeValuesLength == 1`). Dataset nodes produce N values after jq `.[]` split — mismatched counts between sources trigger the Length case which returns null.
+Observed: 2026-05-01
+
+## Test suite does not verify cross-transaction value persistence
+The H5mTest CLI tests verify value counts via `list value` output, but run in-process where the work queue completes synchronously. They don't catch persistence-context changes (em.detach, em.clear) that break value visibility across transactions. Both em.clear() and selective em.detach() passed all 222 tests while producing 0 persisted values at runtime. Any optimization touching the Hibernate persistence context needs an integration test that uploads data, then queries the DB in a separate transaction to verify values exist.
+Observed: 2026-05-07
+
+## Hibernate JSON column dirty-checking is 27% of upload CPU
+After Will's work queue optimizations (getTopLevelNodes, streaming), Hibernate dirty-checking became the dominant bottleneck at 27%. The `FormatMapperBasedJavaType.deepCopy` deserializes and re-serializes the JSON `data` column on every flush to compare with the snapshot. Selective em.detach() of computed values after flush gives ~13% speedup but needs proper test coverage before it can be safely applied.
+Observed: 2026-05-07
+
+## ValueService.create() detach-after-flush gives 20% CPU reduction
+Detaching the merged ValueEntity immediately after em.merge()+em.flush() in ValueService.create() and returning the original transient object (which already has all fields populated including the id copied from merged.id) reduces total CPU samples by 20% on a 5-run rhivos-perf-comprehensive import. Dirty-checking samples dropped 42% (6087→3522). The key insight: em.merge() returns a new managed copy while the original parameter stays detached — returning the original avoids LazyInitializationException since its fields were set by the caller. Combined with a native UPDATE for the existingValue.data mutation case in WorkService.execute() (replacing reliance on Hibernate dirty-detection at commit time), all 222 tests pass. Attempting to also detach entities loaded by getDescendantValuesByNodes() fails because ValueEntity.getPath() recursively traverses the lazy `sources` collection — detaching breaks the proxy chain. Removing CascadeType.MERGE from ValueEntity.sources would be needed to fully detach query results, but causes 16 test failures due to cascade behavior changes. The remaining dirty-checking hotspot is calculateSqlJsonpathValuesFirstOrAll (71% of remaining dirty-check samples) where session.doWork() triggers auto-flush on accumulated managed entities from earlier queries.
+Observed: 2026-05-11
+
+## Horreum has two separate notification/action systems
+Horreum's outbound messaging has two distinct subsystems: (1) **Notifications** — per-user/per-team subscription-based alerts for change detection, missing data, missing values, expected runs, and API key expiration. Uses `NotificationPlugin` SPI with CDI `Instance<NotificationPlugin>` discovery. Only `EmailPlugin` ships by default. Configured via `Watch` (who subscribes per test) + `NotificationSettings` (how each user/team wants to be notified). (2) **Actions** — per-test webhook-style integrations triggered by `ActionEvent` enum events (test/new, run/new, change/new, experiment_result/new, dataset_labels/computed). Uses `ActionPlugin` SPI with 4 implementations: `HttpAction`, `SlackChannelMessageAction`, `GitHubIssueCreateAction`, `GitHubIssueCommentAction`. Each Action stores config (JSON) + secrets (JSON) + event type. The two systems connect via `ServiceMediator`: change detection in `AlertingServiceImpl` fires `Change.Event` → `ServiceMediator.newChange()` → both `ActionServiceImpl.onNewChange()` (actions) and `EventAggregator.onNewChange()` (aggregates changes per dataset, then after 1s delay → `ServiceMediator.newDatasetChanges()` → `NotificationServiceImpl.onNewChanges()`). The `notificationsEnabled` boolean on `Test` controls whether notifications fire. For h5m's simpler needs, a single plugin SPI combining both patterns would suffice.
+Observed: 2026-05-13

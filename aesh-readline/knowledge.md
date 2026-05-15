@@ -22,10 +22,22 @@ Observed: 2026-04-17
 FFM requires `--enable-native-access=ALL-UNNAMED` at runtime (warning in Java 22-23, error in Java 24+). Must be set in maven-surefire-plugin argLine for tests.
 Observed: 2026-04-17
 
-## readConsoleKeyEvent is dead code
-readConsoleKeyEvent() exists in both the JNI and FFM WinConsoleNative but has zero callers. WinSysTerminal.readConsoleInput() exclusively calls readConsoleInputEvent() which handles both key and window-resize events. readConsoleKeyEvent is a strict subset — it only returns key events and discards everything else. It was likely the original API before readConsoleInputEvent was added to support SIGWINCH.
-Observed: 2026-04-18
+## readConsoleKeyEvent dead code — RESOLVED
+readConsoleKeyEvent() was removed from both JNI and FFM WinConsoleNative in the cleanup PR. Only readConsoleInputEvent() remains, which is the only method called by WinSysTerminal.
+Observed: 2026-04-18, Resolved: 2026-04-24
 
-## VIRTUAL_TERMINAL_PROCESSING constant is duplicated
-WinSysTerminal defines its own `VIRTUAL_TERMINAL_PROCESSING = 0x0004` while WinConsoleNative defines `ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004`. Same value, two constants. WinSysTerminal uses its own copy at line 207.
-Observed: 2026-04-18
+## VIRTUAL_TERMINAL_PROCESSING duplication — RESOLVED
+WinSysTerminal now uses `WinConsoleNative.ENABLE_VIRTUAL_TERMINAL_PROCESSING` instead of its own duplicate constant. Fixed in the cleanup PR.
+Observed: 2026-04-18, Resolved: 2026-04-24
+
+## Windows Terminal process-tree detection does not work
+detectWindowsTerminalByProcess() walks the parent process tree looking for WindowsTerminal.exe, but this approach fails on Windows because Windows Terminal hosts via ConPTY as a sibling process, not a parent. The method needs to be replaced with a registry check approach (HKCU\Console\%%Startup has DefaultTerminalApplication). The env-var path (WT_SESSION/WT_PROFILE_ID) works fine; the process fallback is the broken path.
+Observed: 2026-04-24
+
+## slf4j 1.7.12 is stale
+terminal-ssh uses slf4j-api 1.7.12 (from 2015). Current stable is 2.0.x. The version is declared in both the parent pom.xml and redundantly redeclared in terminal-ssh/pom.xml. Only terminal-ssh uses it.
+Observed: 2026-04-24
+
+## TerminalEnvironment tests are environment-dependent
+TerminalEnvironmentTest only verifies that methods don't throw and returns consistent values. It cannot test specific terminal detection logic because TerminalEnvironment reads real System.getenv() with no injection seam. Adding a package-private constructor that accepts a Map<String,String> would enable proper unit testing.
+Observed: 2026-04-24

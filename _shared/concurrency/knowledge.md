@@ -21,3 +21,7 @@ Observed: 2026-04-16
 ## em.merge() parameter stays detached
 `em.merge(entity)` returns a NEW managed copy; the original parameter remains detached. Accessing lazy fields on the original parameter outside the session throws LazyInitializationException. Extract needed data from the returned managed copy into local variables before the session closes.
 Observed: 2026-04-16
+
+## Debugging @Dependent scope: diagnostics on shared state that never appear
+When debugging with diagnostics (log statements, System.err) added to a method on a shared object (e.g., WorkQueue.isIdle()), the diagnostics never appearing is itself the clue — it means the caller is invoking a different instance. If the code path is definitely exercised but your diagnostic output is absent, suspect CDI scope creating duplicate instances rather than a logging configuration issue.
+Observed: 2026-04-25

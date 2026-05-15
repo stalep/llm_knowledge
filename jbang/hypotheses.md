@@ -5,10 +5,13 @@ When parseCommand is used instead of execute, the parent-level options (--previe
 more tests beyond the currently failing ones if other tests rely on --verbose or --fresh being
 set before the subcommand.
 
-Status: unconfirmed
-Confirmations: 0
+Status: confirmed and fixed
+Fix: JBang.parseCommand() calls applyParentFlags() to scan raw args for global flags.
+     JBang.beforeParse() resets all Util flags. Aesh issue #421 fixed inherited option
+     propagation when placed after subcommand name.
+Confirmations: 3+
 First observed: 2026-04-18
-Last tested: 2026-04-18
+Last tested: 2026-05-03
 
 ## Template parseProperties empty defVal handling may affect other templates
 

@@ -64,3 +64,50 @@ Fix: use an annotation transformer to `@Vetoed` the class when the capability is
 the `HealthBuildItem` with a `Capability.SMALLRYE_HEALTH` check (return null if missing).
 The SSH module already does this correctly; the WebSocket module was missing it.
 Observed: 2026-04-13
+
+## aesh-processor enables compile-time command metadata generation
+
+The `aesh-processor` annotation processor generates `CommandMetadataProvider` implementations
+at compile time, eliminating runtime reflection for command parsing. Adding it as a compile-scope
+dependency of the runtime module makes it transitive to user applications — javac auto-discovers
+it via `META-INF/services/javax.annotation.processing.Processor`. At runtime,
+`AeshCommandContainerBuilder.create()` checks `MetadataProviderRegistry.getProvider()` first;
+CDI integration is preserved because `AeshCdiCommandContainerBuilder` creates instances from CDI
+before passing them to the parent (which uses the provider only for metadata, not instantiation).
+For native images, register the ServiceLoader entries via `ServiceProviderBuildItem.allProvidersFromClassPath()`.
+Observed: 2026-04-18
+
+## Aesh library version upgrades may break core/deployment module
+
+Quarkus `core/deployment` uses internal aesh APIs (SettingsBuilder, AeshCommandContainer,
+AliasManager, ReadlineConsole) in `AeshConsole.java` and `ConsoleCommandBuildItem.java`.
+When upgrading aesh versions, always check these files in addition to the aesh extension modules.
+Known breakages in aesh 3.6: `CommandLineParserBuilder` removed (use `new AeshCommandLineParser()`
+directly), `SettingsBuilder` type parameters reduced from 6 to 1, `AliasManager` constructor
+no longer throws `IOException`.
+Observed: 2026-04-18
+
+## SmallRye Config: prefer int with @WithDefault over OptionalInt for "zero means unlimited"
+
+When a config property uses zero to mean "no limit" (e.g., max-connections), use `@WithDefault("0") int`
+rather than `OptionalInt`. The `OptionalInt` pattern forces `.orElse()` calls at every use site and
+conflates "not set" with "unlimited" unnecessarily. Reviewer feedback (David Lloyd) confirmed this
+as the preferred Quarkus convention.
+Observed: 2026-04-18
+
+## Aesh GroupCommandDefinition cannot have @Argument fields
+
+`@GroupCommandDefinition` commands cannot define `@Argument` fields — aesh throws
+`CommandRegistryException: Group commands can not have arguments defined` at registration time.
+Use `@Option` instead. This affects both group commands with direct execution logic (like a
+"smart remove" that matches by name) and sub-command mode entry points (like `use <folder>`).
+Observed: 2026-05-06
+
+## Aesh CLConverterManager has no enum converter
+
+`CLConverterManager.getConverter()` does an exact map lookup for type converters but has no
+entry for enum types. When using the aesh-processor (which generates metadata with field setters),
+enum options silently fail — the string value is never converted to the enum constant. The
+reflection-based path handled enums differently. Fix: add an `EnumConverter` using `Enum.valueOf()`
+and fall back to it in `getConverter()` when `clazz.isEnum()` returns true.
+Observed: 2026-05-07

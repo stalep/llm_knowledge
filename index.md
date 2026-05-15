@@ -11,6 +11,7 @@
 - [aesh-readline](./aesh-readline/) — Æsh terminal/readline: Windows native code, FFM migration, console API
 - [h5m](./h5m/) — PoC rewrite of Horreum: DAG-based performance data transformation and regression detection
 - [horreum](./horreum/) — Performance regression detection system: 6-entity pipeline, event-driven, PostgreSQL + Keycloak
+- [jhunter](./jhunter/) — Java port of Hunter/E-Divisive change point detection: zero-dependency library, JMH benchmarks
 - [qdup](./qdup/) — Remote command execution tool: shell lifecycle, deferred commands, SSH path resolution
 - [jjq](./jjq/) — Pure Java jq engine: bytecode VM, multi-backend JSON adapters, GraalVM native-image
 - [jbang](./jbang/) — jbang CLI tool: picocli-to-aesh migration, option parsing, preview mode
