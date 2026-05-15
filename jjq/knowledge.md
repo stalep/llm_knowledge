@@ -29,3 +29,23 @@ Observed: 2026-04-13
 ## Integer fast-path in number representation avoids BigDecimal overhead
 JqNumber uses a hybrid long/BigDecimal/double representation. Most jq programs work with small integers, so the long fast-path avoids BigDecimal allocation. This is a significant allocation reduction for typical workloads (array indexing, counting, simple arithmetic).
 Observed: 2026-04-13
+
+## Lazy Jackson object serialization can avoid full map materialization
+In `jjq-jackson`, iterating `LazyObjectMap.entrySet()` through `JacksonConverter.toJsonNode` no longer needs to force `ensureFullyConverted()`. A custom lazy `entrySet()` iterator preserves insertion order and converts only visited fields. This avoids allocating full `LinkedHashMap` entries when serializing objects that were only partially accessed.
+Observed: 2026-05-14
+
+## Jackson adapter module tests require reactor build when jjq-core SNAPSHOT is not installed
+Running `mvn -pl jjq-jackson test` can fail with missing `io.hyperfoil.tools:jjq-core:0.1.3-SNAPSHOT` if the local snapshot is not installed/published. Running tests with reactor modules (e.g. `mvn -pl jjq-core,jjq-jackson test`) resolves dependency wiring reliably.
+Observed: 2026-05-14
+
+## Jackson lazy conversion crossover can be handled with field-count threshold
+For small objects, eager conversion avoids lazy wrapper overhead; for larger objects, lazy conversion still reduces work when only a subset of fields is touched. In `LazyJacksonConverter`, using an object-field threshold (currently 8) enables eager conversion for small objects while keeping lazy behavior for larger objects.
+Observed: 2026-05-14
+
+## Benchmarking Jackson threshold needs VM reuse to isolate converter effects
+Using `JqProgram.apply(...)` in microbenchmarks includes per-invocation `VirtualMachine` construction overhead, which can dominate threshold deltas. Reusing precompiled `VirtualMachine` instances in `JacksonThresholdBenchmark` produces cleaner converter-focused comparisons for `fromJsonNodeLazy`/`toJsonNode` tuning.
+Observed: 2026-05-14
+
+## Jackson threshold changes mostly shift throughput trade-offs, not allocation shape
+With isolated benchmarks and async-profiler alloc sampling, thresholds `0/8/12/16` keep the same dominant allocation sources (`LinkedHashMap`, `LinkedHashMap$Entry`, `LazyObjectMap`, `JqObject`). Tuning the eager threshold changed relative throughput by workload shape, but did not introduce a new primary allocation hotspot.
+Observed: 2026-05-14
